@@ -1,0 +1,36 @@
+using RepeRPC
+
+server = RepeRPC.Server("localhost", 8080)
+
+RepeRPC.register(server, "/api/add", function(params, request)
+    a = get(params, "a", 0)
+    b = get(params, "b", 0)
+    return Dict("result" => a + b)
+end)
+
+RepeRPC.register(server, "/api/multiply", function(params, request)
+    x = get(params, "x", 0)
+    y = get(params, "y", 0)
+    return Dict("result" => x * y)
+end)
+
+RepeRPC.register(server, "/api/get_data", function(params, request)
+    return Dict(
+        "timestamp" => time(),
+        "version" => "1.0.0",
+        "data" => [1, 2, 3, 4, 5]
+    )
+end)
+
+RepeRPC.register(server, "/api/log", function(params, request)
+    println("Log: ", params)
+    return Dict("status" => "logged")
+end)
+
+RepeRPC.use(server, function(request)
+    println("Request: ", parse_query(request))
+    return nothing
+end)
+
+println("Starting REPE server on localhost:8080...")
+start_server(server)

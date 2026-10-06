@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>REPE WebSocket Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #38bdf8; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.5rem; max-width: 1000px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 1.5rem; border: 1px solid #334155; }
+  .card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: #94a3b8; }
+  label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.25rem; }
+  input { width: 100%; padding: 0.5rem; border-radius: 6px; border: 1px solid #475569;
+          background: #0f172a; color: #e2e8f0; font-size: 1rem; margin-bottom: 0.75rem; }
+  button { padding: 0.5rem 1.25rem; border-radius: 6px; border: none; font-size: 0.9rem;
+           cursor: pointer; font-weight: 600; transition: background 0.15s; }
+  .btn-blue { background: #2563eb; color: white; }
+  .btn-blue:hover { background: #1d4ed8; }
+  .btn-green { background: #16a34a; color: white; }
+  .btn-green:hover { background: #15803d; }
+  .btn-red { background: #dc2626; color: white; }
+  .btn-red:hover { background: #b91c1c; }
+  .btn-purple { background: #7c3aed; color: white; }
+  .btn-purple:hover { background: #6d28d9; }
+  .result { margin-top: 1rem; padding: 0.75rem; background: #0f172a; border-radius: 6px;
+            font-family: monospace; font-size: 0.9rem; min-height: 2.5rem; word-break: break-all; }
+  .status { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 99px; font-size: 0.8rem; font-weight: 600; }
+  .status.connected { background: #16a34a33; color: #4ade80; }
+  .status.disconnected { background: #dc262633; color: #f87171; }
+  .counter-val { font-size: 3rem; font-weight: 700; text-align: center; padding: 1rem 0; color: #38bdf8; }
+  .btn-row { display: flex; gap: 0.5rem; justify-content: center; }
+  #log { max-height: 200px; overflow-y: auto; font-size: 0.8rem; color: #64748b; }
+  #log div { padding: 2px 0; border-bottom: 1px solid #1e293b; }
+</style>
+</head>
+<body>
+
+<h1>REPE WebSocket Demo <span id="status" class="status disconnected">disconnected</span></h1>
+
+<div class="grid">
+
+  <!-- Counter -->
+  <div class="card">
+    <h2>Counter</h2>
+    <div class="counter-val" id="counter-val">&mdash;</div>
+    <div class="btn-row">
+      <button class="btn-red" onclick="rpc('/decrement', null, updateCounter)">&minus; 1</button>
+      <button class="btn-blue" onclick="rpc('/counter', null, updateCounter)">Read</button>
+      <button class="btn-green" onclick="rpc('/increment', null, updateCounter)">+ 1</button>
+    </div>
+    <div class="btn-row" style="margin-top:0.5rem">
+      <button class="btn-purple" onclick="rpc('/counter', 0, updateCounter)">Reset</button>
+    </div>
+  </div>
+
+  <!-- Calculator -->
+  <div class="card">
+    <h2>Calculator &mdash; /add</h2>
+    <label>a</label>
+    <input type="number" id="calc-a" value="10">
+    <label>b</label>
+    <input type="number" id="calc-b" value="20">
+    <button class="btn-blue" onclick="calcAdd()">Add</button>
+    <div class="result" id="calc-result"></div>
+  </div>
+
+  <!-- Echo -->
+  <div class="card">
+    <h2>Echo &mdash; /echo</h2>
+    <label>Message</label>
+    <input type="text" id="echo-input" value="Hello from the browser!">
+    <button class="btn-blue" onclick="echoMsg()">Send</button>
+    <div class="result" id="echo-result"></div>
+  </div>
+
+  <!-- Server Time -->
+  <div class="card">
+    <h2>Server Info</h2>
+    <button class="btn-blue" onclick="rpc('/time', null, r => show('info-result', r))">Get Time</button>
+    <button class="btn-green" onclick="rpc('/uptime', null, r => show('info-result', r + ' seconds'))" style="margin-left:0.5rem">Uptime</button>
+    <div class="result" id="info-result"></div>
+  </div>
+
+  <!-- Log -->
+  <div class="card" style="grid-column: 1 / -1">
+    <h2>Message Log</h2>
+    <div id="log"></div>
+  </div>
+
+</div>
+
+<script>
+// --- REPE Binary Protocol ---
+
+const HEADER_SIZE = 48;
+const REPE_SPEC   = 0x1507;
+const REPE_VER    = 1;
+const Q_JSON_PTR  = 1;
+const B_JSON      = 2;
+const B_UTF8      = 3;
+
+let nextId = 1;
+const pending = new Map();
+let ws = null;
+
+function buildMessage(method, params, notify = false) {
+    const enc = new TextEncoder();
+    const qBytes = enc.encode(method);
+    const bBytes = params !== null && params !== undefined
+        ? enc.encode(JSON.stringify(params)) : new Uint8Array(0);
+    const total = HEADER_SIZE + qBytes.length + bBytes.length;
+    const buf = new ArrayBuffer(total);
+    const v = new DataView(buf);
+    const id = nextId++;
+
+    v.setUint32(0, total, true);        // length lo
+    v.setUint32(4, 0, true);            // length hi
+    v.setUint16(8, REPE_SPEC, true);    // spec
+    v.setUint8(10, REPE_VER);           // version
+    v.setUint8(11, notify ? 1 : 0);     // notify
+    // 4 bytes reserved (zero)
+    v.setUint32(16, id, true);           // id lo
+    v.setUint32(20, 0, true);           // id hi
+    v.setUint32(24, qBytes.length, true);// query_length lo
+    v.setUint32(28, 0, true);
+    v.setUint32(32, bBytes.length, true);// body_length lo
+    v.setUint32(36, 0, true);
+    v.setUint16(40, Q_JSON_PTR, true);  // query_format
+    v.setUint16(42, B_JSON, true);      // body_format
+    // ec = 0
+
+    const out = new Uint8Array(buf);
+    out.set(qBytes, HEADER_SIZE);
+    out.set(bBytes, HEADER_SIZE + qBytes.length);
+    return { buf, id };
+}
+
+function parseResponse(data) {
+    const v = new DataView(data);
+    const id         = v.getUint32(16, true);
+    const qLen       = v.getUint32(24, true);
+    const bLen       = v.getUint32(32, true);
+    const bodyFmt    = v.getUint16(42, true);
+    const ec         = v.getUint32(44, true);
+    const bodyBytes  = new Uint8Array(data, HEADER_SIZE + qLen, bLen);
+    const text       = new TextDecoder().decode(bodyBytes);
+    const body       = (bodyFmt === B_JSON && bLen > 0) ? JSON.parse(text) : text;
+    return { id, ec, body };
+}
+
+function rpc(method, params, callback) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { log('Not connected'); return; }
+    const { buf, id } = buildMessage(method, params);
+    pending.set(id, callback);
+    ws.send(buf);
+    log('\u2192 ' + method + (params !== null && params !== undefined ? ' ' + JSON.stringify(params) : ''));
+}
+
+// --- WebSocket connection ---
+
+function connect() {
+    ws = new WebSocket('ws://' + location.host);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+        document.getElementById('status').className = 'status connected';
+        document.getElementById('status').textContent = 'connected';
+        log('WebSocket connected');
+        rpc('/counter', null, updateCounter);   // initial read
+    };
+
+    ws.onmessage = (evt) => {
+        const resp = parseResponse(evt.data);
+        log('\u2190 id=' + resp.id + ' ec=' + resp.ec + ' ' + JSON.stringify(resp.body));
+        const cb = pending.get(resp.id);
+        if (cb) { pending.delete(resp.id); cb(resp.body, resp.ec); }
+    };
+
+    ws.onclose = () => {
+        document.getElementById('status').className = 'status disconnected';
+        document.getElementById('status').textContent = 'disconnected';
+        log('WebSocket closed \u2014 reconnecting in 2s');
+        setTimeout(connect, 2000);
+    };
+}
+
+// --- UI helpers ---
+
+function show(id, val) { document.getElementById(id).textContent = typeof val === 'object' ? JSON.stringify(val) : val; }
+function updateCounter(val) { document.getElementById('counter-val').textContent = val; }
+function log(msg) {
+    const el = document.getElementById('log');
+    const d = document.createElement('div');
+    d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+    el.prepend(d);
+    while (el.children.length > 50) el.lastChild.remove();
+}
+
+function calcAdd() {
+    const a = parseFloat(document.getElementById('calc-a').value);
+    const b = parseFloat(document.getElementById('calc-b').value);
+    rpc('/add', {a, b}, (r) => show('calc-result', 'Result: ' + r));
+}
+
+function echoMsg() {
+    const msg = document.getElementById('echo-input').value;
+    rpc('/echo', {message: msg, timestamp: Date.now()}, (r) => show('echo-result', JSON.stringify(r)));
+}
+
+connect();
+</script>
+</body>
+</html>
