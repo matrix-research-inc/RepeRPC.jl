@@ -21,9 +21,10 @@ RepeRPCReplTreeExt = "ReplTree"
 [compat]
 BeveFormat = "3"
 CodecZstd = "0.8"
-HTTP = "1"
+HTTP = "1, 2.8"
 JSON = "1.1"
 ReplTree = "0.3"
+Sockets = "<0.0.1, 1.9"
 julia = "1.9"
 
 [extras]
