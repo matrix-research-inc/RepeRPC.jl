@@ -156,6 +156,8 @@ function _serve_uniudp_loop(server::UniUDPServer)
                     continue
                 end
                 @warn "Error processing message" exception=(e, catch_backtrace())
+                # Yield so a persistent failure cannot spin this task and starve the others
+                yield()
             end
         end
     end
