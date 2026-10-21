@@ -30,8 +30,6 @@ jobs:
           # 'min' is the lowest version allowed by [compat] julia in Project.toml
           - version: 'min'
             os: ubuntu-latest
-          - version: 'lts'
-            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3

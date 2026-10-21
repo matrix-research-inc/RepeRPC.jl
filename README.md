@@ -23,7 +23,7 @@ Julia implementation of the [REPE (Remote Efficient Protocol Extension)](https:/
 
 ## Requirements
 
-- Julia 1.9 or higher
+- Julia 1.12 or higher
 - For C++ server (optional):
   - C++20 compatible compiler
   - CMake 3.15+
@@ -997,7 +997,7 @@ For complete documentation including tag-based filtering, health monitoring, dyn
 
 ## ReplTree Integration
 
-RepeRPC.jl optionally integrates with [ReplTree.jl](https://github.com/stephenberry/ReplTree.jl) to serve interactive REPL menu hierarchies over the network. Load `ReplTree` alongside `RepeRPC` to activate the extension automatically.
+RepeRPC.jl optionally integrates with [ReplTree.jl](https://github.com/matrix-research-inc/ReplTree.jl) to serve interactive REPL menu hierarchies over the network. Load `ReplTree` alongside `RepeRPC` to activate the extension automatically.
 
 ### Flat Registry
 

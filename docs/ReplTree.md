@@ -1,6 +1,6 @@
 # ReplTree Integration
 
-RepeRPC.jl provides optional integration with [ReplTree.jl](https://github.com/stephenberry/ReplTree.jl) for serving interactive REPL menu hierarchies over the network. Load `ReplTree` alongside `RepeRPC` to activate the extension — no explicit import is needed.
+RepeRPC.jl provides optional integration with [ReplTree.jl](https://github.com/matrix-research-inc/ReplTree.jl) for serving interactive REPL menu hierarchies over the network. Load `ReplTree` alongside `RepeRPC` to activate the extension — no explicit import is needed.
 
 ## Features
 
