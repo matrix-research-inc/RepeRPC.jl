@@ -46,9 +46,8 @@ NodeConfig("ws://10.0.0.5:8080")
   certificates. Defaults to `true`. Only meaningful for `wss://` URLs.
 - `tls_config`: optional `Reseau.TLS.Config` for custom CA trust stores or
   client certificates. Requires a `wss://` URL.
-- `max_frame_size`: largest inbound WebSocket frame, in bytes. Default
-  `nothing`, which keeps the WebSocket client's 16 MiB default. Requires a
-  `ws://` or `wss://` URL.
+- `max_frame_size`: largest inbound WebSocket frame, in bytes. Default 16 MiB.
+  Requires a `ws://` or `wss://` URL.
 """
 struct NodeConfig
     name::String
@@ -61,7 +60,7 @@ struct NodeConfig
     tags::Vector{String}
     timeout::Float64
     max_body_length::Union{Nothing,Int}
-    max_frame_size::Union{Nothing,Int}
+    max_frame_size::Int
 
     function NodeConfig(host::String, port::Int;
                         name::String = host,
@@ -77,8 +76,7 @@ struct NodeConfig
         timeout <= 0 && throw(ArgumentError("timeout must be positive"))
         max_body_length !== nothing && max_body_length < 0 &&
             throw(ArgumentError("max_body_length must be non-negative or nothing, got $max_body_length"))
-        max_frame_size !== nothing && max_frame_size <= 0 &&
-            throw(ArgumentError("max_frame_size must be positive or nothing, got $max_frame_size"))
+        max_frame_size === nothing || _check_max_frame_size(max_frame_size)
 
         # An unset env var collapsing to "" would otherwise authenticate any
         # client sending `Authorization: Bearer ` against a server configured
@@ -87,21 +85,16 @@ struct NodeConfig
         auth_token !== nothing && isempty(auth_token) &&
             throw(ArgumentError("auth_token must be non-empty; pass nothing to disable authentication"))
 
+        _check_tls_config(url, tls_config, require_ssl_verification)
+
         # Security-relevant keywords only have meaning for WebSocket
         # transport. A caller who supplies them without a ws:// or wss:// URL
         # is almost certainly misconfigured: copy-pasting a wss example,
         # then switching the host/port and forgetting the scheme should
         # error loudly rather than silently drop auth.
-        # The WebSocket client reads verification from a TLS config, so a
-        # per-node override alongside one would be silently contradictory.
-        tls_config !== nothing && !require_ssl_verification &&
-            throw(ArgumentError("require_ssl_verification = false cannot be combined with tls_config; disable verification on the config instead"))
-
         if url === nothing
             auth_token !== nothing &&
                 throw(ArgumentError("auth_token requires a ws:// or wss:// URL; TCP transport does not authenticate at the REPE layer"))
-            tls_config !== nothing &&
-                throw(ArgumentError("tls_config requires a wss:// URL"))
             max_frame_size !== nothing &&
                 throw(ArgumentError("max_frame_size requires a ws:// or wss:// URL"))
             require_ssl_verification ||
@@ -115,7 +108,7 @@ struct NodeConfig
             tls_config,
             tags, timeout,
             max_body_length === nothing ? nothing : Int(max_body_length),
-            max_frame_size === nothing ? nothing : Int(max_frame_size))
+            something(max_frame_size, _WS_DEFAULT_MAX_FRAME_SIZE))
     end
 end
 
@@ -242,7 +235,7 @@ function _make_client(config::NodeConfig)
         auth_token = config.auth_token,
         require_ssl_verification = config.require_ssl_verification,
         tls_config = config.tls_config,
-        max_frame_size = something(config.max_frame_size, _WS_DEFAULT_MAX_FRAME_SIZE))
+        max_frame_size = config.max_frame_size)
 end
 
 """

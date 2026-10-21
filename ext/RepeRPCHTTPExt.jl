@@ -83,7 +83,7 @@ function RepeRPC.WSServer(host::String="localhost", port::Int=8080;
     # empty bytes after the prefix."
     auth_token !== nothing && isempty(auth_token) &&
         throw(ArgumentError("auth_token must be non-empty; pass nothing to disable authentication"))
-    _check_max_frame_size(max_frame_size)
+    RepeRPC._check_max_frame_size(max_frame_size)
 
     return _WSServer(host, port, nothing, false,
                      Dict{String,Function}(), Function[],
@@ -94,13 +94,9 @@ function RepeRPC.WSServer(host::String="localhost", port::Int=8080;
                      Int(max_frame_size))
 end
 
-function _check_max_frame_size(max_frame_size::Integer)
-    max_frame_size > 0 ||
-        throw(ArgumentError("max_frame_size must be positive, got $max_frame_size"))
-end
-
 # `host:port`, bracketing an IPv6 literal so its colons are not read as the
-# port separator.
+# port separator. Mirrors Reseau's `HostResolvers.join_host_port`, which is not
+# public.
 _host_port(host::AbstractString, port::Integer) =
     occursin(':', host) ? "[$host]:$port" : "$host:$port"
 
@@ -172,6 +168,8 @@ function RepeRPC.use(server::_WSServer, middleware::Function)
 end
 
 function RepeRPC.listen(server::_WSServer; async::Bool=false)
+    server.running && throw(ArgumentError("server is already listening"))
+
     ws_handler = function(http)
         # Auth runs before any other dispatch so unauthorized callers cannot
         # reach the HTTP handler, the HTML body, or trigger a WebSocket
@@ -209,39 +207,37 @@ function RepeRPC.listen(server::_WSServer; async::Bool=false)
         end
     end
 
-    # Set before binding: a connection accepted the moment the listener opens
+    # HTTP.jl serves TLS only from a listener the caller binds, so bind both
+    # schemes here and share one path.
+    address = _host_port(server.host, server.port)
+    listener = server.tls_config === nothing ? Reseau.TCP.listen("tcp", address) :
+               Reseau.TLS.listen("tcp", address, server.tls_config)
+    # Set before serving: a connection accepted the moment the server starts
     # must not see a stopped server.
     server.running = true
     server.server_handle = try
-        # HTTP.jl serves TLS from a listener the caller binds, so a wss://
-        # server binds its own; a plain one lets HTTP.jl bind the address.
-        if server.tls_config === nothing
-            HTTP.listen!(ws_handler, server.host, server.port)
-        else
-            listener = Reseau.TLS.listen("tcp", _host_port(server.host, server.port),
-                                         server.tls_config)
-            try
-                HTTP.listen!(ws_handler, listener)
-            catch
-                close(listener)
-                rethrow()
-            end
-        end
+        HTTP.listen!(ws_handler, listener)
     catch
         server.running = false
+        close(listener)
         rethrow()
     end
     # Report the bound port, which differs from the requested one for port 0.
     server.port = HTTP.port(server.server_handle)
-    scheme = server.tls_config === nothing ? "ws" : "wss"
-    @info "REPE WebSocket Server listening on $scheme://$(server.host):$(server.port)"
+    @info "REPE WebSocket Server listening on $(_server_url(server))"
 
-    if async
-        yield()
-    else
+    # listen! returns once the server accepts connections. A blocking listen
+    # owns the server, so it stops it however the wait ends (Ctrl-C included).
+    async && return
+    try
         wait(server.server_handle)
+    finally
+        RepeRPC.stop(server)
     end
 end
+
+_server_url(server::_WSServer) =
+    (server.tls_config === nothing ? "ws://" : "wss://") * _host_port(server.host, server.port)
 
 function RepeRPC.stop(server::_WSServer)
     if !server.running
@@ -329,10 +325,9 @@ function Base.show(io::IO, server::_WSServer)
     status = server.running ? "running" : "stopped"
     n_handlers = length(server.handlers)
     handler_text = n_handlers == 1 ? "1 handler" : "$n_handlers handlers"
-    scheme = server.tls_config === nothing ? "ws" : "wss"
     auth = server.auth_verifier !== nothing ? ", auth=verifier" :
            server.auth_token !== nothing ? ", auth=token" : ""
-    print(io, "WSServer(\"$scheme://$(server.host):$(server.port)\", $status, $handler_text$auth)")
+    print(io, "WSServer(\"$(_server_url(server))\", $status, $handler_text$auth)")
 end
 
 # ========== WSClient ==========
@@ -393,7 +388,7 @@ HTTP.jl's built-in stack.
   verification with a `tls_config`, set `verify_peer = false` on the config
   instead.
 - `tls_config`: a `Reseau.TLS.Config` for custom CA bundles or client
-  certificates.
+  certificates. Requires a `wss://` URL.
 - `extra_headers`: additional HTTP headers to send during the upgrade. Useful
   for custom auth schemes when `auth_verifier` on the server inspects headers
   other than `Authorization`.
@@ -423,12 +418,8 @@ function RepeRPC.WSClient(url::AbstractString;
     # Same non-negative check as the TCP `Client`/`Server`.
     max_body_length !== nothing && max_body_length < 0 &&
         throw(ArgumentError("max_body_length must be non-negative or nothing, got $max_body_length"))
-    _check_max_frame_size(max_frame_size)
-
-    # HTTP.jl reads verification from the config when one is given, and
-    # rejects the per-call override alongside it.
-    tls_config !== nothing && !require_ssl_verification &&
-        throw(ArgumentError("require_ssl_verification = false cannot be combined with tls_config; set verify_peer = false on the config instead"))
+    RepeRPC._check_max_frame_size(max_frame_size)
+    RepeRPC._check_tls_config(url, tls_config, require_ssl_verification)
 
     headers = if extra_headers === nothing
         Pair{String,String}[]
@@ -458,7 +449,7 @@ function RepeRPC.WSClient(url::AbstractString;
 end
 
 function RepeRPC.WSClient(host::String, port::Int; kwargs...)
-    return RepeRPC.WSClient("ws://$host:$port"; kwargs...)
+    return RepeRPC.WSClient("ws://" * _host_port(host, port); kwargs...)
 end
 
 function RepeRPC.connect(client::_WSClient)
@@ -487,14 +478,16 @@ function RepeRPC.connect(client::_WSClient)
     end
 
     open_kwargs = Dict{Symbol,Any}(:headers => headers, :maxframesize => client.max_frame_size)
-    # HTTP.jl takes a TLS config only on a `Client`'s transport. The WebSocket
+    # HTTP.jl takes a TLS config only on a `Client`'s transport. Like HTTP.jl's
+    # default client it honors the proxy environment variables. The WebSocket
     # does not close a client it was handed, so this task closes it below.
     http_client = nothing
     if client.tls_config === nothing
         # require_ssl_verification only matters for wss://; HTTP.jl ignores it for ws://
         open_kwargs[:require_ssl_verification] = client.require_ssl_verification
     else
-        http_client = HTTP.Client(transport = HTTP.Transport(tls_config = client.tls_config))
+        http_client = HTTP.Client(transport = HTTP.Transport(tls_config = client.tls_config,
+                                                        proxy = HTTP.ProxyFromEnvironment()))
         open_kwargs[:client] = http_client
     end
 

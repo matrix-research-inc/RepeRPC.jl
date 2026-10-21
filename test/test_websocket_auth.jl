@@ -415,8 +415,14 @@ end
 
         # Verification is configured on the TLS config, so the per-client
         # override is refused alongside one, at construction.
+        @test_throws ArgumentError RepeRPC.WSClient("wss://example.com";
+            tls_config = tls, require_ssl_verification = false)
         @test_throws ArgumentError RepeRPC.NodeConfig("wss://example.com";
             tls_config = tls, require_ssl_verification = false)
+
+        # A TLS config on a plain ws:// URL would be silently ignored.
+        @test_throws ArgumentError RepeRPC.WSClient("ws://example.com"; tls_config = tls)
+        @test_throws ArgumentError RepeRPC.NodeConfig("ws://example.com"; tls_config = tls)
     end
 
     #==========================================================================#

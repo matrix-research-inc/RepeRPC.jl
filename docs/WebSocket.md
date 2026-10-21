@@ -268,6 +268,11 @@ client = WSClient("ws://server:8080"; max_frame_size = 256 * 1024 * 1024)
 
 `NodeConfig` takes the same keyword for a Fleet's WebSocket nodes.
 
+The limit applies per frame, not per message. A peer may split one message into
+fragments, and HTTP.jl reassembles up to 1024 of them, so a hostile peer can make
+the receiver buffer up to 1024 × `max_frame_size` for a single message. Where a
+hard memory bound matters, use the TCP transport.
+
 ## Secure Deployment
 
 REPE WebSocket servers terminate TLS natively and require a bearer token (or

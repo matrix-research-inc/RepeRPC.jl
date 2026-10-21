@@ -81,6 +81,21 @@ function remote_menu end
 # NodeConfig. Matches HTTP.jl's own default.
 const _WS_DEFAULT_MAX_FRAME_SIZE = 16 * 1024 * 1024
 
+# Construction-time checks shared by the WebSocket client, server, and NodeConfig.
+_check_max_frame_size(max_frame_size::Integer) = max_frame_size > 0 ||
+    throw(ArgumentError("max_frame_size must be positive, got $max_frame_size"))
+
+# A TLS config only applies to wss://. HTTP.jl reads verification from the
+# config and rejects a per-call override alongside one.
+function _check_tls_config(url, tls_config, require_ssl_verification::Bool)
+    tls_config === nothing && return
+    url !== nothing && startswith(lowercase(url), "wss://") ||
+        throw(ArgumentError("tls_config requires a wss:// URL"))
+    require_ssl_verification ||
+        throw(ArgumentError("require_ssl_verification = false cannot be combined with tls_config; set verify_peer = false on the config instead"))
+    return
+end
+
 # Stubs for extension-provided WebSocket transport (requires HTTP.jl)
 function WSServer(args...; kwargs...)
     error("WSServer requires HTTP.jl. Run `using HTTP` before creating a WSServer.")
