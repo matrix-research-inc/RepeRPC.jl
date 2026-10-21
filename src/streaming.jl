@@ -54,6 +54,9 @@ function StreamBody(io::IO, length::Integer;
     return StreamBody(io, Int(length), body_format, own)
 end
 
+_not_regular_file(path) =
+    ArgumentError("FileBody requires a regular file, but $(repr(path)) is not one")
+
 """
     FileBody(path::AbstractString; body_format = BODY_RAW_BINARY) -> StreamBody
 
@@ -66,7 +69,14 @@ register(server, "/artifacts/get", (params, request) -> FileBody(resolve(params[
 ```
 """
 function FileBody(path::AbstractString; body_format::BodyFormat = BODY_RAW_BINARY)
-    io = open(path, "r")
+    io = try
+        open(path, "r")
+    catch e
+        # Windows refuses to open a directory at all; report it like any other
+        # non-regular file rather than as an OS permission error.
+        e isa SystemError && isdir(path) && throw(_not_regular_file(path))
+        rethrow()
+    end
     try
         # Stat the open handle (not the path) so the declared length and the
         # type check come from the same fstat -- no TOCTOU window where the file
@@ -74,8 +84,7 @@ function FileBody(path::AbstractString; body_format::BodyFormat = BODY_RAW_BINAR
         # regular file (a directory opens fine on POSIX but has no streamable
         # body), failing cleanly here instead of as a mid-transfer short read.
         st = stat(io)
-        isfile(st) || throw(ArgumentError(
-            "FileBody requires a regular file, but $(repr(path)) is not one"))
+        isfile(st) || throw(_not_regular_file(path))
         return StreamBody(io, st.size; body_format = body_format, own = true)
     catch e
         close(io)
