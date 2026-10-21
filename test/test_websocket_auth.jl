@@ -114,7 +114,7 @@ end
             cfg = RepeRPC.NodeConfig("localhost", 8080)
             @test cfg.url === nothing
             @test cfg.auth_token === nothing
-            @test cfg.sslconfig === nothing
+            @test cfg.tls_config === nothing
             @test cfg.require_ssl_verification == true
         end
     end
@@ -391,31 +391,38 @@ end
     end
 
     #==========================================================================#
-    # sslconfig plumbing: verify it round-trips into the client and server
-    # structs without exercising real TLS (cert generation is out of scope).
+    # tls_config plumbing: verify it round-trips into the client and server
+    # structs. Real TLS handshakes are covered in test_websocket_tls.jl.
     #==========================================================================#
-    @testset "sslconfig plumbing" begin
-        sentinel = (marker = :tls_test,)
+    @testset "tls_config plumbing" begin
+        tls = Reseau.TLS.Config(verify_peer = false)
 
-        srv = RepeRPC.WSServer("127.0.0.1", 0; sslconfig = sentinel)
-        @test srv.sslconfig === sentinel
+        srv = RepeRPC.WSServer("127.0.0.1", 0; tls_config = tls)
+        @test srv.tls_config === tls
 
-        client = RepeRPC.WSClient("wss://example.com"; sslconfig = sentinel,
-                                                     require_ssl_verification = false)
+        client = RepeRPC.WSClient("wss://example.com"; tls_config = tls)
         ext = Base.get_extension(RepeRPC, :RepeRPCHTTPExt)
         @test client isa ext._WSClient
-        @test client.sslconfig === sentinel
-        @test client.require_ssl_verification == false
+        @test client.tls_config === tls
 
-        # Fleet should forward sslconfig from NodeConfig into the WSClient.
-        cfg = RepeRPC.NodeConfig("wss://example.com"; sslconfig = sentinel,
-                                                    require_ssl_verification = false,
+        # Fleet should forward tls_config from NodeConfig into the WSClient.
+        cfg = RepeRPC.NodeConfig("wss://example.com"; tls_config = tls,
                                                     name = "tls-node")
         fleet = RepeRPC.Fleet([cfg])
         node = fleet["tls-node"]
         @test node.client isa ext._WSClient
-        @test node.client.sslconfig === sentinel
-        @test node.client.require_ssl_verification == false
+        @test node.client.tls_config === tls
+
+        # Verification is configured on the TLS config, so the per-client
+        # override is refused alongside one, at construction.
+        @test_throws ArgumentError RepeRPC.WSClient("wss://example.com";
+            tls_config = tls, require_ssl_verification = false)
+        @test_throws ArgumentError RepeRPC.NodeConfig("wss://example.com";
+            tls_config = tls, require_ssl_verification = false)
+
+        # A TLS config on a plain ws:// URL would be silently ignored.
+        @test_throws ArgumentError RepeRPC.WSClient("ws://example.com"; tls_config = tls)
+        @test_throws ArgumentError RepeRPC.NodeConfig("ws://example.com"; tls_config = tls)
     end
 
     #==========================================================================#
@@ -733,9 +740,9 @@ end
                                                       auth_token = "secret")
         end
 
-        @testset "sslconfig without url is rejected" begin
+        @testset "tls_config without url is rejected" begin
             @test_throws ArgumentError RepeRPC.NodeConfig("localhost", 8080;
-                                                      sslconfig = (marker = :ssl,))
+                                                      tls_config = (marker = :tls,))
         end
 
         @testset "require_ssl_verification=false without url is rejected" begin
@@ -749,7 +756,7 @@ end
             cfg = RepeRPC.NodeConfig("localhost", 8080)
             @test cfg.url === nothing
             @test cfg.auth_token === nothing
-            @test cfg.sslconfig === nothing
+            @test cfg.tls_config === nothing
             @test cfg.require_ssl_verification == true
         end
 

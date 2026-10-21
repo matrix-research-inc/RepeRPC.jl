@@ -476,7 +476,7 @@
             end
             close(ws)                      # ...and the peer hangs up on it
         end
-        port = Int(Sockets.getsockname(srv.listener.server)[2])
+        port = parse(Int, rsplit(HTTP.WebSockets.server_addr(srv), ':'; limit = 2)[2])
 
         try
             client = RepeRPC.WSClient("127.0.0.1", port; timeout=30.0)

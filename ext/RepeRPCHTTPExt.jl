@@ -2,8 +2,8 @@ module RepeRPCHTTPExt
 
 import HTTP
 import HTTP.WebSockets
+import Reseau
 using RepeRPC
-using Sockets: getsockname
 
 # ========== WSServer ==========
 
@@ -11,7 +11,7 @@ using Sockets: getsockname
     _WSServer
 
 Internal struct backing [`RepeRPC.WSServer`](@ref). Carries optional TLS
-configuration (`sslconfig`) and bearer-token / pluggable auth state
+configuration (`tls_config`) and bearer-token / pluggable auth state
 (`auth_token`, `auth_verifier`).
 """
 mutable struct _WSServer <: RepeRPC.AbstractServer
@@ -27,16 +27,17 @@ mutable struct _WSServer <: RepeRPC.AbstractServer
     # Security-relevant configuration is fixed at construction. `const`
     # makes that intent enforceable so an unsafe mutation cannot land
     # after listen() with no compile-time warning.
-    const sslconfig::Any
+    const tls_config::Union{Nothing,Reseau.TLS.Config}
     const auth_token::Union{Nothing,String}
     const auth_verifier::Union{Nothing,Function}
+    const max_frame_size::Int
 end
 
 """
     RepeRPC.WSServer(host="localhost", port=8080; kwargs...) -> WSServer
 
 Construct a REPE WebSocket server. The transport is plain `ws://` unless
-`sslconfig` is supplied, in which case the server speaks `wss://` natively.
+`tls_config` is supplied, in which case the server speaks `wss://` natively.
 
 # Keyword Arguments
 - `print_stacktrace`: log full stack traces on handler errors. Default `false`.
@@ -45,9 +46,9 @@ Construct a REPE WebSocket server. The transport is plain `ws://` unless
 - `http_handler`: optional `(http) -> Bool` callback for handling non-upgrade
   HTTP requests. Returning `true` means the handler wrote a response; `false`
   falls through to the default 426/HTML response.
-- `sslconfig`: an `MbedTLS.SSLConfig` (or compatible) to terminate TLS inside
-  the server. Required for `wss://`. When `nothing` (default) the server
-  serves plain `ws://`.
+- `tls_config`: a `Reseau.TLS.Config` carrying the server certificate and key,
+  to terminate TLS inside the server. Required for `wss://`. When `nothing`
+  (default) the server serves plain `ws://`.
 - `auth_token`: shared secret. When set, the server requires every incoming
   request to carry `Authorization: Bearer <token>`. Mismatched or missing
   tokens get `401 Unauthorized` and the connection is closed before the
@@ -57,34 +58,47 @@ Construct a REPE WebSocket server. The transport is plain `ws://` unless
   (e.g., scope/claims checks, IP allow-lists). When set it takes precedence
   over `auth_token`. Throwing or returning anything other than `true` is
   treated as failure.
+- `max_frame_size`: largest inbound WebSocket frame, in bytes. A client that
+  sends a larger frame has its connection closed. Default 16 MiB.
 
 # Example
 
 ```julia
+using Reseau
+
 server = RepeRPC.WSServer("0.0.0.0", 8443;
-                      sslconfig  = MbedTLS.SSLConfig(certfile, keyfile),
+                      tls_config = Reseau.TLS.Config(cert_file = certfile, key_file = keyfile),
                       auth_token = ENV["REPE_TOKEN"])
 ```
 """
 function RepeRPC.WSServer(host::String="localhost", port::Int=8080;
                        print_stacktrace::Bool=false, html::String="",
                        http_handler::Union{Function, Nothing}=nothing,
-                       sslconfig = nothing,
+                       tls_config::Union{Nothing,Reseau.TLS.Config} = nothing,
                        auth_token::Union{Nothing,AbstractString} = nothing,
-                       auth_verifier::Union{Nothing,Function} = nothing)
+                       auth_verifier::Union{Nothing,Function} = nothing,
+                       max_frame_size::Integer = RepeRPC._WS_DEFAULT_MAX_FRAME_SIZE)
     # Reject empty token at construction so a misconfigured ENV var cannot
     # collapse the auth check to "matches `Authorization: Bearer ` with
     # empty bytes after the prefix."
     auth_token !== nothing && isempty(auth_token) &&
         throw(ArgumentError("auth_token must be non-empty; pass nothing to disable authentication"))
+    RepeRPC._check_max_frame_size(max_frame_size)
 
     return _WSServer(host, port, nothing, false,
                      Dict{String,Function}(), Function[],
                      print_stacktrace, html, http_handler,
-                     sslconfig,
+                     tls_config,
                      auth_token === nothing ? nothing : String(auth_token),
-                     auth_verifier)
+                     auth_verifier,
+                     Int(max_frame_size))
 end
+
+# `host:port`, bracketing an IPv6 literal so its colons are not read as the
+# port separator. Mirrors Reseau's `HostResolvers.join_host_port`, which is not
+# public.
+_host_port(host::AbstractString, port::Integer) =
+    occursin(':', host) ? "[$host]:$port" : "$host:$port"
 
 # Cap on the Authorization header we will examine. A malicious or buggy
 # client could otherwise send a multi-MB header that we pay an allocation
@@ -154,9 +168,7 @@ function RepeRPC.use(server::_WSServer, middleware::Function)
 end
 
 function RepeRPC.listen(server::_WSServer; async::Bool=false)
-    server.running = true
-    scheme = server.sslconfig === nothing ? "ws" : "wss"
-    @info "REPE WebSocket Server listening on $scheme://$(server.host):$(server.port)"
+    server.running && throw(ArgumentError("server is already listening"))
 
     ws_handler = function(http)
         # Auth runs before any other dispatch so unauthorized callers cannot
@@ -172,7 +184,7 @@ function RepeRPC.listen(server::_WSServer; async::Bool=false)
         end
 
         if HTTP.WebSockets.isupgrade(http.message)
-            HTTP.WebSockets.upgrade(http) do ws
+            HTTP.WebSockets.upgrade(http; maxframesize=server.max_frame_size) do ws
                 _handle_ws_connection(server, ws)
             end
         else
@@ -195,24 +207,37 @@ function RepeRPC.listen(server::_WSServer; async::Bool=false)
         end
     end
 
-    # Build kwargs for HTTP.listen!: sslconfig only when set, so the plaintext
-    # path stays untouched when no TLS is configured.
-    listen_kwargs = server.sslconfig === nothing ?
-        NamedTuple() : (sslconfig = server.sslconfig,)
+    # HTTP.jl serves TLS only from a listener the caller binds, so bind both
+    # schemes here and share one path.
+    address = _host_port(server.host, server.port)
+    listener = server.tls_config === nothing ? Reseau.TCP.listen("tcp", address) :
+               Reseau.TLS.listen("tcp", address, server.tls_config)
+    # Set before serving: a connection accepted the moment the server starts
+    # must not see a stopped server.
+    server.running = true
+    server.server_handle = try
+        HTTP.listen!(ws_handler, listener)
+    catch
+        server.running = false
+        close(listener)
+        rethrow()
+    end
+    # Report the bound port, which differs from the requested one for port 0.
+    server.port = HTTP.port(server.server_handle)
+    @info "REPE WebSocket Server listening on $(_server_url(server))"
 
-    if async
-        server.server_handle = HTTP.listen!(ws_handler, server.host, server.port;
-                                            listen_kwargs...)
-        # When port 0 is requested, update with the actual bound port
-        if server.port == 0
-            addr = getsockname(server.server_handle.listener.server)
-            server.port = Int(addr[2])
-        end
-        yield()
-    else
-        HTTP.listen(ws_handler, server.host, server.port; listen_kwargs...)
+    # listen! returns once the server accepts connections. A blocking listen
+    # owns the server, so it stops it however the wait ends (Ctrl-C included).
+    async && return
+    try
+        wait(server.server_handle)
+    finally
+        RepeRPC.stop(server)
     end
 end
+
+_server_url(server::_WSServer) =
+    (server.tls_config === nothing ? "ws://" : "wss://") * _host_port(server.host, server.port)
 
 function RepeRPC.stop(server::_WSServer)
     if !server.running
@@ -300,10 +325,9 @@ function Base.show(io::IO, server::_WSServer)
     status = server.running ? "running" : "stopped"
     n_handlers = length(server.handlers)
     handler_text = n_handlers == 1 ? "1 handler" : "$n_handlers handlers"
-    scheme = server.sslconfig === nothing ? "ws" : "wss"
     auth = server.auth_verifier !== nothing ? ", auth=verifier" :
            server.auth_token !== nothing ? ", auth=token" : ""
-    print(io, "WSServer(\"$scheme://$(server.host):$(server.port)\", $status, $handler_text$auth)")
+    print(io, "WSServer(\"$(_server_url(server))\", $status, $handler_text$auth)")
 end
 
 # ========== WSClient ==========
@@ -328,8 +352,9 @@ mutable struct _WSClient <: RepeRPC.AbstractClient
     # matching note on `_WSServer`.
     const auth_token::Union{Nothing,String}
     const require_ssl_verification::Bool
-    const sslconfig::Any
+    const tls_config::Union{Nothing,Reseau.TLS.Config}
     const extra_headers::Vector{Pair{String,String}}
+    const max_frame_size::Int
     next_id::Threads.Atomic{UInt64}
     pending_requests::Dict{UInt64, RepeRPC.PendingRequest}
     listener_task::Union{Task, Nothing}
@@ -359,12 +384,16 @@ HTTP.jl's built-in stack.
   WebSocket upgrade request. Pair this with a matching `auth_token` on
   [`RepeRPC.WSServer`](@ref).
 - `require_ssl_verification`: when `false`, the client accepts self-signed
-  certificates. Default `true`. Only meaningful for `wss://`.
-- `sslconfig`: an `MbedTLS.SSLConfig` (or compatible) for custom CA bundles or
-  client certificates. Passed through to HTTP.jl.
+  certificates. Default `true`. Only meaningful for `wss://`. To skip
+  verification with a `tls_config`, set `verify_peer = false` on the config
+  instead.
+- `tls_config`: a `Reseau.TLS.Config` for custom CA bundles or client
+  certificates. Requires a `wss://` URL.
 - `extra_headers`: additional HTTP headers to send during the upgrade. Useful
   for custom auth schemes when `auth_verifier` on the server inspects headers
   other than `Authorization`.
+- `max_frame_size`: largest inbound WebSocket frame, in bytes. A larger
+  response closes the connection. Default 16 MiB.
 
 # Example
 
@@ -379,8 +408,9 @@ function RepeRPC.WSClient(url::AbstractString;
                        max_body_length::Union{Nothing,Integer} = nothing,
                        auth_token::Union{Nothing,AbstractString} = nothing,
                        require_ssl_verification::Bool = true,
-                       sslconfig = nothing,
-                       extra_headers = nothing)
+                       tls_config::Union{Nothing,Reseau.TLS.Config} = nothing,
+                       extra_headers = nothing,
+                       max_frame_size::Integer = RepeRPC._WS_DEFAULT_MAX_FRAME_SIZE)
     # Same construction-time empty-token check as the server side.
     auth_token !== nothing && isempty(auth_token) &&
         throw(ArgumentError("auth_token must be non-empty; pass nothing to disable authentication"))
@@ -388,6 +418,8 @@ function RepeRPC.WSClient(url::AbstractString;
     # Same non-negative check as the TCP `Client`/`Server`.
     max_body_length !== nothing && max_body_length < 0 &&
         throw(ArgumentError("max_body_length must be non-negative or nothing, got $max_body_length"))
+    RepeRPC._check_max_frame_size(max_frame_size)
+    RepeRPC._check_tls_config(url, tls_config, require_ssl_verification)
 
     headers = if extra_headers === nothing
         Pair{String,String}[]
@@ -407,8 +439,9 @@ function RepeRPC.WSClient(url::AbstractString;
                      max_body_length === nothing ? nothing : Int(max_body_length),
                      auth_token === nothing ? nothing : String(auth_token),
                      require_ssl_verification,
-                     sslconfig,
+                     tls_config,
                      headers,
+                     Int(max_frame_size),
                      Threads.Atomic{UInt64}(1),
                      Dict{UInt64, RepeRPC.PendingRequest}(),
                      nothing,
@@ -416,7 +449,7 @@ function RepeRPC.WSClient(url::AbstractString;
 end
 
 function RepeRPC.WSClient(host::String, port::Int; kwargs...)
-    return RepeRPC.WSClient("ws://$host:$port"; kwargs...)
+    return RepeRPC.WSClient("ws://" * _host_port(host, port); kwargs...)
 end
 
 function RepeRPC.connect(client::_WSClient)
@@ -444,11 +477,18 @@ function RepeRPC.connect(client::_WSClient)
         push!(headers, "Authorization" => "Bearer $(client.auth_token)")
     end
 
-    open_kwargs = Dict{Symbol,Any}(:headers => headers)
-    # require_ssl_verification only matters for wss://; HTTP.jl ignores it for ws://
-    open_kwargs[:require_ssl_verification] = client.require_ssl_verification
-    if client.sslconfig !== nothing
-        open_kwargs[:sslconfig] = client.sslconfig
+    open_kwargs = Dict{Symbol,Any}(:headers => headers, :maxframesize => client.max_frame_size)
+    # HTTP.jl takes a TLS config only on a `Client`'s transport. Like HTTP.jl's
+    # default client it honors the proxy environment variables. The WebSocket
+    # does not close a client it was handed, so this task closes it below.
+    http_client = nothing
+    if client.tls_config === nothing
+        # require_ssl_verification only matters for wss://; HTTP.jl ignores it for ws://
+        open_kwargs[:require_ssl_verification] = client.require_ssl_verification
+    else
+        http_client = HTTP.Client(transport = HTTP.Transport(tls_config = client.tls_config,
+                                                        proxy = HTTP.ProxyFromEnvironment()))
+        open_kwargs[:client] = http_client
     end
 
     client.listener_task = @async begin
@@ -480,6 +520,7 @@ function RepeRPC.connect(client::_WSClient)
                 end
                 empty!(client.pending_requests)
             end
+            http_client === nothing || close(http_client)
         end
     end
 
