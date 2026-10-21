@@ -1,7 +1,7 @@
 name = "RepeRPC"
 uuid = "00aef740-0b97-42f6-9e7e-69b14f2893b5"
 authors = ["Stephen Berry <stephenberry.developer@gmail.com>"]
-version = "3.0.0"
+version = "4.0.0"
 
 [deps]
 BeveFormat = "7708a389-c994-43cc-8329-c76d993c33c0"
@@ -12,25 +12,29 @@ Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 CodecZstd = "6b39b394-51ab-5f42-8807-6242bab2b4c2"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 ReplTree = "d572e37e-0ce6-4d6f-8bb6-5ae049631b7f"
+Reseau = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 
 [extensions]
 RepeRPCCodecZstdExt = "CodecZstd"
-RepeRPCHTTPExt = "HTTP"
+RepeRPCHTTPExt = ["HTTP", "Reseau"]
 RepeRPCReplTreeExt = "ReplTree"
 
 [compat]
 BeveFormat = "3"
 CodecZstd = "0.8"
-HTTP = "1"
+HTTP = "2.11"
 JSON = "1.1"
 ReplTree = "1"
+Reseau = "1.6"
+Sockets = "1.11"
 julia = "1.12"
 
 [extras]
 CodecZstd = "6b39b394-51ab-5f42-8807-6242bab2b4c2"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 ReplTree = "d572e37e-0ce6-4d6f-8bb6-5ae049631b7f"
+Reseau = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "HTTP", "ReplTree", "CodecZstd"]
+test = ["Test", "HTTP", "ReplTree", "CodecZstd", "Reseau"]

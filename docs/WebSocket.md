@@ -254,6 +254,20 @@ ws.onmessage = (evt) => {
 };
 ```
 
+## Message Size
+
+Each REPE message travels as one WebSocket frame, and both ends refuse frames
+larger than `max_frame_size`, 16 MiB by default. A peer that sends a larger
+frame has its connection closed. Raise the limit on both ends to exchange
+bigger messages:
+
+```julia
+server = WSServer("0.0.0.0", 8080; max_frame_size = 256 * 1024 * 1024)
+client = WSClient("ws://server:8080"; max_frame_size = 256 * 1024 * 1024)
+```
+
+`NodeConfig` takes the same keyword for a Fleet's WebSocket nodes.
+
 ## Secure Deployment
 
 REPE WebSocket servers terminate TLS natively and require a bearer token (or
@@ -261,20 +275,19 @@ custom verifier) on every upgrade request. No reverse proxy is required.
 
 ### Native TLS server
 
-TLS termination uses [MbedTLS.jl](https://github.com/JuliaLang/MbedTLS.jl).
-Add it to your project explicitly (`] add MbedTLS`); it is not a hard
-dependency of RepeRPC.jl and HTTP.jl's transitive supply of it is not
-guaranteed across future HTTP.jl releases.
+TLS termination uses [Reseau.jl](https://github.com/JuliaServices/Reseau.jl),
+HTTP.jl's network and TLS layer. Add it to your project (`] add Reseau`) to
+build a `Reseau.TLS.Config`.
 
 ```julia
 using RepeRPC
 import HTTP
-using MbedTLS
+using Reseau
 
-ssl = MbedTLS.SSLConfig("server.crt", "server.key")
+tls = Reseau.TLS.Config(cert_file = "server.crt", key_file = "server.key")
 
 server = WSServer("0.0.0.0", 8443;
-    sslconfig  = ssl,
+    tls_config = tls,
     auth_token = ENV["REPE_TOKEN"])
 
 RepeRPC.register(server, "/status", (params, request) -> Dict("ok" => true))
@@ -290,7 +303,7 @@ checks), pass an `auth_verifier::Function` instead:
 
 ```julia
 server = WSServer("0.0.0.0", 8443;
-    sslconfig     = ssl,
+    tls_config    = tls,
     auth_verifier = function(http)
         # HTTP.header is case-insensitive and returns the empty string
         # when the header is missing.
@@ -340,54 +353,55 @@ openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
     -keyout ca.key -out ca.crt -subj "/CN=My Internal CA"
 ```
 
-**Step 2: Per-server certificate signed by your CA.** The `CN` (and any
-`subjectAltName` entries) must match the hostname clients will use to
-connect. Repeat for each server.
+**Step 2: Per-server certificate signed by your CA.** The `subjectAltName`
+must list the hostname clients will use to connect. The TLS stack ignores the
+`CN` and refuses a certificate that names its host only there. Repeat for each
+server.
 
 ```bash
 openssl req -new -newkey rsa:2048 -nodes \
     -keyout server.key -out server.csr \
-    -subj "/CN=data-1.internal"
+    -subj "/CN=data-1.internal" \
+    -addext "subjectAltName=DNS:data-1.internal"
 
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-    -out server.crt -days 365
+    -copy_extensions copy -out server.crt -days 365
 ```
 
-For multiple hostnames or IPs on one cert, write a small openssl config with
-a `[v3_req]` section listing `subjectAltName = DNS:host1,DNS:host2,IP:10.0.0.5`
-and pass `-extensions v3_req -extfile server.cnf` to `openssl x509 -req`.
+For multiple hostnames or IPs on one cert, list them all, e.g.
+`-addext "subjectAltName=DNS:host1,DNS:host2,IP:10.0.0.5"`. `-addext` and
+`-copy_extensions` need OpenSSL 3.0 or later.
 
 **Step 3: Server uses the signed cert.**
 
 ```julia
-using MbedTLS
+using Reseau
 
-ssl = MbedTLS.SSLConfig("server.crt", "server.key")
+tls = Reseau.TLS.Config(cert_file = "server.crt", key_file = "server.key")
 server = WSServer("0.0.0.0", 8443;
-    sslconfig  = ssl,
+    tls_config = tls,
     auth_token = ENV["REPE_TOKEN"])
 ```
 
-**Step 4: Clients trust your CA root.** Load `ca.crt` into the client's
-`SSLConfig` so the WebSocket handshake verifies against it. Verification
-stays on; only the trust anchor changes.
+**Step 4: Clients trust your CA root.** Give the client a `Reseau.TLS.Config`
+whose `ca_file` is `ca.crt`, so the WebSocket handshake verifies against it.
+Verification stays on; only the trust anchor changes.
 
 ```julia
-using MbedTLS
+using Reseau
 
-client_ssl = MbedTLS.SSLConfig(true)  # client mode, verification required
-MbedTLS.ca_chain!(client_ssl, MbedTLS.crt_parse(read("ca.crt", String)))
+client_tls = Reseau.TLS.Config(ca_file = "ca.crt")
 
 client = WSClient("wss://data-1.internal:8443/repe";
-    sslconfig  = client_ssl,
+    tls_config = client_tls,
     auth_token = ENV["REPE_TOKEN"])
 ```
 
-In a Fleet, pass the same `sslconfig` through `NodeConfig`:
+In a Fleet, pass the same `tls_config` through `NodeConfig`:
 
 ```julia
 NodeConfig("wss://data-1.internal:8443/repe";
-    sslconfig  = client_ssl,
+    tls_config = client_tls,
     auth_token = ENV["REPE_TOKEN"],
     tags       = ["team"])
 ```
@@ -397,10 +411,10 @@ NodeConfig("wss://data-1.internal:8443/repe";
 ```bash
 openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout server.key -out server.crt -days 365 \
-    -subj "/CN=localhost"
+    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 ```
 
-Then pair `WSServer(...; sslconfig = MbedTLS.SSLConfig("server.crt", "server.key"))`
+Then pair `WSServer(...; tls_config = Reseau.TLS.Config(cert_file = "server.crt", key_file = "server.key"))`
 on the server side with `WSClient(...; require_ssl_verification = false)` on
 the client side. This is acceptable for a laptop running both endpoints. Do
 not ship `require_ssl_verification = false` to production. Even when you

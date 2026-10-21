@@ -329,7 +329,7 @@ Client("host", 8080;    max_body_length = 8 * 1024^3)
 
 A server rejects an oversized request with `EC_INVALID_HEADER` and closes the connection; a client refuses an oversized response rather than allocating.
 
-Over WebSockets the cap is **client-side only**, and it is a *post-receive* ceiling rather than a pre-allocation bound. HTTP.jl exposes no per-frame read, so by the time REPE sees the header the whole frame is already buffered in memory; `WSClient(...; max_body_length = ...)` bounds what REPE parses and delivers, not what HTTP.jl buffers. `WSServer` takes no `max_body_length` at all — an inbound WebSocket message is governed solely by HTTP.jl's own frame limits, which REPE does not derive from `max_body_length` and which are effectively unbounded by default. Configure HTTP.jl's limits directly to bound inbound WebSocket message size, and use a TCP node where you need a hard pre-allocation bound.
+Over WebSockets the cap is **client-side only**, and it is a *post-receive* ceiling rather than a pre-allocation bound. HTTP.jl exposes no per-frame read, so by the time REPE sees the header the whole frame is already buffered in memory; `WSClient(...; max_body_length = ...)` bounds what REPE parses and delivers, not what HTTP.jl buffers. `WSServer` takes no `max_body_length` at all. Inbound WebSocket messages are bounded by frame size instead: `WSServer`, `WSClient`, and `NodeConfig` take `max_frame_size`, 16 MiB by default, and a peer that sends a larger frame has its connection closed. Raise it for larger messages, and use a TCP node where you need a hard pre-allocation bound.
 
 ### Fleet streaming
 
@@ -813,12 +813,12 @@ every upgrade request. No reverse proxy or VPN is required.
 ```julia
 using RepeRPC
 import HTTP
-using MbedTLS   # add MbedTLS to your project: ] add MbedTLS
+using Reseau   # HTTP.jl's TLS layer; add it to your project: ] add Reseau
 
-ssl = MbedTLS.SSLConfig("server.crt", "server.key")  # PEM files
+tls = Reseau.TLS.Config(cert_file = "server.crt", key_file = "server.key")  # PEM files
 
 server = WSServer("0.0.0.0", 8443;
-    sslconfig  = ssl,
+    tls_config = tls,
     auth_token = ENV["REPE_TOKEN"])
 
 RepeRPC.register(server, "/status", (params, request) -> Dict("ok" => true))
@@ -842,7 +842,8 @@ disconnect(client)
 
 For development with a self-signed certificate, set
 `require_ssl_verification = false`. Use a real CA-issued cert (or a custom
-`sslconfig` with your CA bundle) in production.
+`tls_config = Reseau.TLS.Config(ca_file = "ca.crt")` with your CA bundle) in
+production.
 
 #### Custom auth schemes (`auth_verifier`)
 
@@ -851,7 +852,7 @@ schemes, pass an `auth_verifier` callback to `WSServer`:
 
 ```julia
 server = WSServer("0.0.0.0", 8443;
-    sslconfig     = ssl,
+    tls_config    = tls,
     auth_verifier = function(http)
         # http.message is the HTTP.Request. HTTP.header is case-insensitive
         # and returns the empty string when the header is missing.

@@ -25,8 +25,10 @@ end
 # Use `import` (not `using`) to avoid name conflicts with RepeRPC exports (connect, listen)
 if Base.find_package("HTTP") !== nothing
     import HTTP
+    import Reseau  # HTTP.jl's TLS layer, for wss:// test configs
     include("test_websocket.jl")
     include("test_websocket_auth.jl")
+    include("test_websocket_tls.jl")
     include("test_streaming_websocket.jl")
     include("test_value_stream_websocket.jl")
 end

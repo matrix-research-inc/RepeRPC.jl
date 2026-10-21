@@ -77,6 +77,10 @@ include("uniudp_fleet.jl")
 # Stub for extension-provided remote_menu (requires ReplTree)
 function remote_menu end
 
+# Default cap on an inbound WebSocket frame for WSServer, WSClient, and
+# NodeConfig. Matches HTTP.jl's own default.
+const _WS_DEFAULT_MAX_FRAME_SIZE = 16 * 1024 * 1024
+
 # Stubs for extension-provided WebSocket transport (requires HTTP.jl)
 function WSServer(args...; kwargs...)
     error("WSServer requires HTTP.jl. Run `using HTTP` before creating a WSServer.")
