@@ -23,14 +23,18 @@ const DEDUP_WINDOW = 10.0  # seconds to remember completed messages
 # Concurrent message assembly: buffer chunks from multiple in-flight messages
 # (Initialized after MessageState is defined)
 
-"""
-    socket_fd(sock::UDPSocket) -> Cint
+# Native socket handle: an `int` file descriptor on POSIX, a pointer-sized `SOCKET` on
+# Windows. This matches libuv's `uv_os_fd_t`, which `uv_fileno` writes for sockets.
+const NativeSocket = Sys.iswindows() ? UInt : Cint
 
-Get the underlying file descriptor from a UDPSocket using libuv's uv_fileno.
+"""
+    socket_fd(sock::UDPSocket) -> NativeSocket
+
+Get the underlying native socket handle from a UDPSocket using libuv's uv_fileno.
 """
 function socket_fd(sock::UDPSocket)
-    fdval = Ref{Cint}(0)
-    ret = ccall(:uv_fileno, Cint, (Ptr{Cvoid}, Ref{Cint}), sock.handle, fdval)
+    fdval = Ref{NativeSocket}(0)
+    ret = ccall(:uv_fileno, Cint, (Ptr{Cvoid}, Ref{NativeSocket}), sock.handle, fdval)
     ret != 0 && error("uv_fileno failed: unable to get socket file descriptor")
     return fdval[]
 end
@@ -774,15 +778,22 @@ function parse_packet(packet::Vector{UInt8})
     return header, payload
 end
 
-# Poll structure for poll(2) syscall
-# struct pollfd { int fd; short events; short revents; }
+# Poll structure for poll(2) and WSAPoll
+# POSIX:   struct pollfd   { int fd;    short events; short revents; }
+# Windows: struct WSAPOLLFD { SOCKET fd; short events; short revents; }
 struct PollFD
-    fd::Cint
+    fd::NativeSocket
     events::Cshort
     revents::Cshort
 end
 
-const POLLIN = Cshort(0x0001)
+# Winsock defines POLLIN as POLLRDNORM | POLLRDBAND; its 0x0001 is POLLERR, which
+# WSAPoll rejects as a requested event.
+const POLLIN = @static Sys.iswindows() ? Cshort(0x0300) : Cshort(0x0001)
+
+# Count argument type: `nfds_t` is `unsigned long` on Linux and `unsigned int` on Apple and
+# the BSDs; WSAPoll takes a `ULONG`.
+const PollCount = @static (Sys.islinux() || Sys.iswindows()) ? Culong : Cuint
 
 """
     poll_socket(sock::UDPSocket, timeout_ms::Integer) -> Bool
@@ -795,13 +806,20 @@ function poll_socket(sock::UDPSocket, timeout_ms::Integer)
     fd = socket_fd(sock)
     pfd = Ref(PollFD(fd, POLLIN, Cshort(0)))
     @static if Sys.iswindows()
-        # Windows uses WSAPoll with slightly different semantics
-        ret = ccall((:WSAPoll, "ws2_32"), Cint, (Ref{PollFD}, Cuint, Cint), pfd, 1, timeout_ms)
+        ret = ccall((:WSAPoll, "ws2_32"), stdcall, Cint, (Ref{PollFD}, PollCount, Cint), pfd, 1, timeout_ms)
+        if ret < 0
+            # Winsock reports errors through WSAGetLastError, not errno
+            err = ccall((:WSAGetLastError, "ws2_32"), stdcall, Cint, ())
+            error("WSAPoll failed: $(Libc.FormatMessage(UInt32(err)))")
+        end
     else
-        ret = ccall(:poll, Cint, (Ref{PollFD}, Cuint, Cint), pfd, 1, timeout_ms)
-    end
-    if ret < 0
-        error("poll failed: $(Libc.strerror(Libc.errno()))")
+        ret = ccall(:poll, Cint, (Ref{PollFD}, PollCount, Cint), pfd, 1, timeout_ms)
+        if ret < 0
+            err = Libc.errno()
+            # A signal interrupted the wait; report no data and let the caller poll again
+            err == Libc.EINTR && return false
+            error("poll failed: $(Libc.strerror(err))")
+        end
     end
     return ret > 0 && (pfd[].revents & POLLIN) != 0
 end
