@@ -232,7 +232,7 @@ r = RepeRPC.stream(fleet, "storage-1", "/blob"; into = io)          # RemoteResu
 r = RepeRPC.download(fleet, "storage-1", "/artifacts/get", "out.bin"; params = Dict("id" => "42"))
 ```
 
-**2. SVS pulls** — a [Serialized Value Stream](StreamingValues.md): the server
+**2. SVS pulls** — a [Serialized Value Stream](Streaming.md#streaming-serialized-values-svs): the server
 BEVE-serializes (and optionally zstd-compresses) an in-memory value whose length is
 not known up front, streamed one chunk per request/response round trip. Neither side
 materializes the full serialized copy. The fleet wrappers target one node by name and

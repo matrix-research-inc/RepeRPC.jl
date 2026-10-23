@@ -177,6 +177,19 @@ menu.math.add(a=10, b=20)       # → send_request(client, "/math/add", {"a":10,
 
 The schema is fetched once at menu creation time. If the server's registry changes, call `remote_menu` again to rebuild.
 
+Pass a `Fleet` instead of a `Client` to broadcast every leaf across all matching nodes; each invocation returns the per-node `Dict{String, RemoteResult}`:
+
+```julia
+fleet = Fleet([NodeConfig("worker-1", 8080), NodeConfig("worker-2", 8080)])
+connect!(fleet)
+
+team = remote_menu(fleet)
+team.run_sync()                       # broadcasts /run_sync to every worker
+team.debug.show_times()               # ditto, returns per-node results
+team_primary = remote_menu(fleet; tags=["primary"])
+team_primary.run_sync()               # restricted to nodes tagged "primary"
+```
+
 ## Schema Endpoint
 
 Every served registry exposes a `/__schema__` endpoint that returns a flat `Dict{String, String}` mapping each path to its type:
