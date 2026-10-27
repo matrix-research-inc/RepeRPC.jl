@@ -1,6 +1,8 @@
 module RepeRPC
 
 using Sockets
+# Extended (not shadowed) so `using RepeRPC, Sockets` leaves both names unambiguous
+import Sockets: connect, listen
 import BeveFormat
 
 module JSONInternal

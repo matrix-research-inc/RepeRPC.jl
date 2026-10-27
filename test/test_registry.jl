@@ -367,6 +367,29 @@ using RepeRPC
         @test result4["value"] == 42
     end
 
+    @testset "Registry Request Handling - Function Errors" begin
+        r = RepeRPC.Registry()
+        RepeRPC.register!(r, "reject", x -> throw(RepeRPC.REPEError(RepeRPC.EC_INVALID_BODY, "rejected $x")))
+        RepeRPC.register!(r, "fail", x -> error("failed $x"))
+
+        call(path) = RepeRPC.handle_registry_request(r, RepeRPC.Message(
+            query=path,
+            body=[1],
+            query_format=UInt16(RepeRPC.QUERY_JSON_POINTER),
+            body_format=UInt16(RepeRPC.BODY_JSON)
+        ))
+
+        # A thrown REPEError keeps its code and message
+        resp = call("/reject")
+        @test resp.header.ec == UInt32(RepeRPC.EC_INVALID_BODY)
+        @test String(resp.body) == "rejected 1"
+
+        # Any other exception is a parse error carrying its showerror text
+        resp = call("/fail")
+        @test resp.header.ec == UInt32(RepeRPC.EC_PARSE_ERROR)
+        @test String(resp.body) == "failed 1"
+    end
+
     @testset "Registry with Server Integration" begin
         r = RepeRPC.Registry(
             "counter" => 0,

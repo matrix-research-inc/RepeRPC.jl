@@ -1,4 +1,12 @@
 @testset "Client-Server Tests" begin
+    @testset "connect/listen extend Sockets" begin
+        @test RepeRPC.connect === Sockets.connect
+        @test RepeRPC.listen === Sockets.listen
+        # Loading both packages must leave the unqualified names usable
+        m = Module()
+        @test Core.eval(m, :(using RepeRPC, Sockets; (connect, listen))) == (Sockets.connect, Sockets.listen)
+    end
+
     @testset "Basic RPC" begin
         port = 9001
         server = RepeRPC.Server("localhost", port)
@@ -42,20 +50,45 @@
             end
             return Dict("result" => params["a"] / params["b"])
         end)
-        
+
+        RepeRPC.register(server, "/reject", function(params, request)
+            throw(RepeRPC.REPEError(RepeRPC.EC_INVALID_BODY, "rejected: $(params["reason"])"))
+        end)
+
         # Start server in background and wait for it to be ready
         RepeRPC.listen(server; async=true)
         RepeRPC.wait_for_server(server.host, port)
-        
+
         client = RepeRPC.Client("localhost", port)
         RepeRPC.connect(client)
-        
+
+        remote_error(method, params) = try
+            RepeRPC.send_request(client, method, params)
+            nothing
+        catch e
+            e
+        end
+
         try
             result = RepeRPC.send_request(client, "/divide", Dict("a" => 10, "b" => 2))
             @test result["result"] == 5.0
-            
-            @test_throws Exception RepeRPC.send_request(client, "/nonexistent", Dict())
-            
+
+            # A generic handler exception is a parse error carrying its showerror text
+            err = remote_error("/divide", Dict("a" => 1, "b" => 0))
+            @test err isa RepeRPC.REPEError
+            @test err.code == RepeRPC.EC_PARSE_ERROR
+            @test err.message == "Division by zero"
+
+            # A handler's REPEError reaches the client with its code and message intact
+            err = remote_error("/reject", Dict("reason" => "quota"))
+            @test err isa RepeRPC.REPEError
+            @test err.code == RepeRPC.EC_INVALID_BODY
+            @test err.message == "rejected: quota"
+
+            err = remote_error("/nonexistent", Dict())
+            @test err isa RepeRPC.REPEError
+            @test err.code == RepeRPC.EC_METHOD_NOT_FOUND
+
         finally
             RepeRPC.disconnect(client)
             RepeRPC.stop(server)
