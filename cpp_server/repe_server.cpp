@@ -53,9 +53,9 @@ struct math_service {
 // Simple TCP server using REPE protocol
 class repe_tcp_server {
 private:
-   int server_fd;
    int port;
    bool running;
+   int server_fd;
    math_service service;
    
 public:
@@ -200,11 +200,9 @@ private:
             }
          }
          
-         std::string format_name = (request.header.body_format == 1) ? "BEVE" : 
-                                   (request.header.body_format == 2) ? "JSON" : 
-                                   (request.header.body_format == 3) ? "UTF8" : "BINARY";
-         std::cout << "Request ID " << request.header.id << ", Query: " << request.query 
-                   << ", Format: " << format_name << " (" << request.header.body_format << ")\n";
+         std::cout << "Request ID " << request.header.id << ", Query: " << request.query
+                   << ", Format: " << format_name(request.header.body_format) << " ("
+                   << static_cast<uint16_t>(request.header.body_format) << ")\n";
          
          // Process the request
          process_request(request, response);
@@ -224,15 +222,24 @@ private:
       std::cout << "Client disconnected\n";
    }
    
+   static const char* format_name(glz::repe::body_format format) {
+      switch (format) {
+         case glz::repe::body_format::BEVE: return "BEVE";
+         case glz::repe::body_format::JSON: return "JSON";
+         case glz::repe::body_format::UTF8: return "UTF8";
+         default: return "BINARY";
+      }
+   }
+
    // Helper function to decode parameters based on body format
    template<typename T>
    std::optional<T> decode_params(const glz::repe::message& request) {
-      if (request.header.body_format == 1) { // BEVE
+      if (request.header.body_format == glz::repe::body_format::BEVE) {
          auto result = glz::read_beve<T>(request.body);
          if (result) {
             return result.value();
          }
-      } else if (request.header.body_format == 2) { // JSON
+      } else if (request.header.body_format == glz::repe::body_format::JSON) {
          auto result = glz::read_json<T>(request.body);
          if (result) {
             return result.value();
@@ -240,17 +247,19 @@ private:
       }
       return std::nullopt;
    }
-   
-   // Helper function to encode response based on preferred format
+
+   // Helper function to encode response in BEVE when requested, JSON otherwise
    template<typename T>
-   void encode_response(const T& data, glz::repe::message& response, uint16_t format = 2) {
-      if (format == 1) { // BEVE
-         glz::write_beve(data, response.body);
-         response.header.body_format = 1;
-      } else { // JSON (default)
-         glz::write_json(data, response.body);
-         response.header.body_format = 2;
+   void encode_response(const T& data, glz::repe::message& response, glz::repe::body_format format) {
+      const bool beve = format == glz::repe::body_format::BEVE;
+      const auto err = beve ? glz::write_beve(data, response.body) : glz::write_json(data, response.body);
+      if (err) {
+         response.header.ec = err.ec;
+         response.body = "Failed to encode response";
+         response.header.body_format = glz::repe::body_format::UTF8;
+         return;
       }
+      response.header.body_format = beve ? glz::repe::body_format::BEVE : glz::repe::body_format::JSON;
    }
 
    void process_request(const glz::repe::message& request, glz::repe::message& response) {
@@ -267,7 +276,7 @@ private:
       }
       
       // Default to same format as request for response
-      uint16_t response_format = request.header.body_format;
+      const auto response_format = request.header.body_format;
       
       // Process based on method
       if (method == "add") {
@@ -279,7 +288,7 @@ private:
          } else {
             response.header.ec = glz::error_code::parse_error;
             response.body = "Invalid parameters for add";
-            response.header.body_format = 3; // UTF-8
+            response.header.body_format = glz::repe::body_format::UTF8;
          }
       }
       else if (method == "multiply") {
@@ -291,7 +300,7 @@ private:
          } else {
             response.header.ec = glz::error_code::parse_error;
             response.body = "Invalid parameters for multiply";
-            response.header.body_format = 3; // UTF-8
+            response.header.body_format = glz::repe::body_format::UTF8;
          }
       }
       else if (method == "divide") {
@@ -304,12 +313,12 @@ private:
             } catch (const std::invalid_argument& e) {
                response.header.ec = glz::error_code::invalid_body;
                response.body = e.what();
-               response.header.body_format = 3; // UTF-8
+               response.header.body_format = glz::repe::body_format::UTF8;
             }
          } else {
             response.header.ec = glz::error_code::parse_error;
             response.body = "Invalid parameters for divide";
-            response.header.body_format = 3; // UTF-8
+            response.header.body_format = glz::repe::body_format::UTF8;
          }
       }
       else if (method == "echo") {
@@ -321,7 +330,7 @@ private:
          } else {
             response.header.ec = glz::error_code::parse_error;
             response.body = "Invalid parameters for echo";
-            response.header.body_format = 3; // UTF-8
+            response.header.body_format = glz::repe::body_format::UTF8;
          }
       }
       else if (method == "status") {
@@ -331,7 +340,7 @@ private:
       else {
          response.header.ec = glz::error_code::method_not_found;
          response.body = "Method not found: " + method;
-         response.header.body_format = 3; // UTF-8
+         response.header.body_format = glz::repe::body_format::UTF8;
       }
       
       // Update header lengths

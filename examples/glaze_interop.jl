@@ -1,30 +1,39 @@
 using RepeRPC
-using Sockets
+
+# Both modes speak the method set of the Glaze C++ server in cpp_server/,
+# so the client runs against either that server or this file's server mode.
 
 function connect_to_glaze_server(host::String = "localhost", port::Int = 8081)
     client = RepeRPC.Client(host, port)
     connect(client)
-    
-    println("Connected to Glaze C++ server at $host:$port")
-    
+
+    println("Connected to REPE server at $host:$port")
+
     try
-        result = send_request(client, "/test/echo", 
+        result = send_request(client, "/echo",
                             Dict("message" => "Hello from Julia!"),
                             body_format = RepeRPC.JSON)
         println("Echo response: ", result)
-        
-        result = send_request(client, "/math/add",
-                            Dict("a" => 42, "b" => 58),
-                            body_format = RepeRPC.JSON)
-        println("Math result: ", result)
-        
+
+        result = send_request(client, "/add",
+                            Dict("a" => 42.0, "b" => 58.0),
+                            body_format = RepeRPC.BEVE)
+        println("Add result: ", result)
+
         data = send_request(client, "/status", nothing,
-                          query_format = QUERY_JSON_POINTER,
                           body_format = RepeRPC.JSON)
         println("Server status: ", data)
-        
-    catch e
-        println("Error: ", e)
+
+        # Server-side failures surface as REPEError
+        try
+            send_request(client, "/divide",
+                         Dict("numerator" => 1.0, "denominator" => 0.0),
+                         body_format = RepeRPC.JSON)
+        catch e
+            e isa REPEError || rethrow()
+            println("Divide by zero rejected: ", e.message)
+        end
+
     finally
         disconnect(client)
     end
@@ -32,17 +41,20 @@ end
 
 function create_compatible_server(port::Int = 8082)
     server = RepeRPC.Server("0.0.0.0", port)
-    
-    RepeRPC.register(server, "/test/echo", function(params, request)
-        return params
+
+    RepeRPC.register(server, "/echo", function(params, request)
+        return Dict("result" => "Echo: " * params["message"])
     end)
-    
-    RepeRPC.register(server, "/math/add", function(params, request)
-        a = get(params, "a", 0)
-        b = get(params, "b", 0)
-        return Dict("result" => a + b)
+
+    RepeRPC.register(server, "/add", function(params, request)
+        return Dict("result" => params["a"] + params["b"])
     end)
-    
+
+    RepeRPC.register(server, "/divide", function(params, request)
+        params["denominator"] == 0 && throw(REPEError(RepeRPC.EC_INVALID_BODY, "Division by zero"))
+        return Dict("result" => params["numerator"] / params["denominator"])
+    end)
+
     RepeRPC.register(server, "/status", function(params, request)
         return Dict(
             "status" => "online",
@@ -51,7 +63,7 @@ function create_compatible_server(port::Int = 8082)
             "timestamp" => time()
         )
     end)
-    
+
     println("Starting Julia REPE server on port $port (Glaze-compatible)...")
     listen(server)
 end
