@@ -6,7 +6,7 @@ RepeRPC.jl is fully compatible with the C++ [Glaze](https://github.com/stephenbe
 
 - C++20 compatible compiler
 - CMake 3.15+
-- Glaze (fetched automatically by CMake)
+- Glaze v9.0.0 (fetched automatically by CMake)
 
 ## Building the C++ Server
 
@@ -44,9 +44,10 @@ end
 
 ## Integration Tests
 
+Build the C++ server as above, then from the repository root:
+
 ```bash
-cd test
-./run_glaze_test.sh
+julia --project=. test/interop/glaze.jl
 ```
 
-The script starts the C++ server, runs the Julia client tests against it to verify protocol compatibility, and cleans up the server process.
+The suite starts the server on a free port, exercises every method over both JSON and BEVE (including error mapping, notifications, and concurrent requests), and stops the server. It is not part of `Pkg.test()` because it needs a C++ toolchain. Set `REPE_GLAZE_SERVER` to point at a server binary built elsewhere.

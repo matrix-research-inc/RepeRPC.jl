@@ -26,6 +26,17 @@ server = Server("localhost", 8080; print_stacktrace=true)
 
 A handler that accepts a third argument receives the `ServerConnection`; see [Connection teardown hook](Streaming.md#connection-teardown-hook).
 
+### Handler errors
+
+A handler that throws `REPEError` sends its code and message to the client, which rethrows it as a `REPEError`. Any other exception becomes `EC_PARSE_ERROR` with the exception's `showerror` text, matching Glaze's C++ registry. Registry functions behave the same way.
+
+```julia
+RepeRPC.register(server, "/withdraw", function(params, request)
+    params["amount"] > 100 && throw(REPEError(ErrorCode(4096), "limit exceeded"))
+    return Dict("ok" => true)
+end)
+```
+
 ## Client
 
 ```julia

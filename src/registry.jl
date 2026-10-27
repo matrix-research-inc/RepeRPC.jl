@@ -431,9 +431,8 @@ function handle_registry_request(registry::Registry, request::Message;
         end
 
     catch e
-        error_msg = string(e)
         @error "Registry request error" exception = e
-        return _create_registry_error_response(request, error_msg)
+        return _exception_response(request, e)
     end
 end
 
@@ -580,17 +579,6 @@ function _is_navigable_struct(obj)
     obj isa AbstractArray && return false
     obj isa AbstractDict && return false
     return !isempty(fieldnames(typeof(obj)))
-end
-
-function _create_registry_error_response(request::Message, msg::String)::Message
-    return Message(
-        id=request.header.id,
-        query=request.query,
-        body=msg,
-        query_format=request.header.query_format,
-        body_format=UInt16(BODY_UTF8),
-        ec=UInt32(EC_PARSE_ERROR)
-    )
 end
 
 """

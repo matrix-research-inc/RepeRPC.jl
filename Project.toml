@@ -27,6 +27,7 @@ JSON = "1.1"
 ReplTree = "1"
 Reseau = "1.6"
 Sockets = "1.11"
+Test = "1.11"
 julia = "1.12"
 
 [extras]

@@ -367,8 +367,19 @@ function _process_request_pipeline(handlers::Dict{String,Function},
         if do_print_stacktrace
             print_stacktrace(e)
         end
-        return _create_error_response(request, EC_PARSE_ERROR, string(e))
+        return _exception_response(request, e)
     end
+end
+
+# Error response for an exception raised while handling `request`. A `REPEError`
+# keeps its code and message, so a handler chooses the code its client sees; any
+# other exception maps to EC_PARSE_ERROR (as Glaze's registry does) with its
+# `showerror` text as the message.
+function _exception_response(request::Message, e)::Message
+    if e isa REPEError && e.code != EC_OK
+        return _create_error_response(request, e.code, e.message)
+    end
+    return _create_error_response(request, EC_PARSE_ERROR, sprint(showerror, e))
 end
 
 function _process_request(server::Server, request::Message,
